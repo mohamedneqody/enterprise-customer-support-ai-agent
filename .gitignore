@@ -1,0 +1,24 @@
+# Secrets and credentials
+.env
+*.env
+!.env.example
+
+# Large model weights (Hugging Face / PyTorch / Safetensors > 100MB)
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Archives & Temporary files
+*.zip
+*.log
+data/temp_uploads/

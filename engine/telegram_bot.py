@@ -24,7 +24,8 @@ def is_configured():
 
 
 def send_message(chat_id, text, token=None):
-    """إرسال رسالة رد للعميل على Telegram عبر sendMessage API."""
+    """إرسال رسالة رد للعميل على Telegram عبر sendMessage API.
+    النصوص الأطول من حد تيليجرام (4096) تُقسّم لرسائل متتالية بدل رفضها."""
     bot_token = token or get_token()
     if not bot_token:
         return False, 'token_missing'
@@ -32,25 +33,26 @@ def send_message(chat_id, text, token=None):
         return False, 'chat_id_and_text_required'
 
     url = 'https://api.telegram.org/bot%s/sendMessage' % bot_token
-    payload = {
-        'chat_id': chat_id,
-        'text': text,
-    }
-
-    try:
-        data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={'Content-Type': 'application/json'}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            body = resp.read().decode('utf-8')
-            res = json.loads(body)
-            return bool(res.get('ok')), res
-    except Exception as e:
-        print('[Telegram Error] Failed to send message to chat %s: %s' % (chat_id, e), file=sys.stderr)
-        return False, str(e)
+    chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [text]
+    last_ok, last_res = False, {}
+    for idx, chunk in enumerate(chunks, 1):
+        body = chunk if len(chunks) == 1 else '%s\n(%d/%d)' % (chunk, idx, len(chunks))
+        payload = {'chat_id': chat_id, 'text': body}
+        try:
+            data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body_json = resp.read().decode('utf-8')
+                last_res = json.loads(body_json)
+                last_ok = bool(last_res.get('ok'))
+        except Exception as e:
+            print('[Telegram Error] Failed to send message to chat %s: %s' % (chat_id, e), file=sys.stderr)
+            return False, str(e)
+    return last_ok, last_res
 
 
 def extract_update_details(update_json):
@@ -81,7 +83,8 @@ def handle_update(update_json):
 
     # لو رسالة بدون نص (ستيكر أو صورة من غير كابشن)
     if not text:
-        default_reply = 'أهلاً بك في متجر النور! يرجى كتابة استفسارك نصياً لنتمكن من مساعدتك.'
+        store_name = os.environ.get('STORE_NAME', '').strip() or 'الدعم'
+        default_reply = f'أهلاً بك في {store_name}! يرجى كتابة استفسارك نصياً لنتمكن من مساعدتك.'
         send_message(chat_id, default_reply)
         return {'ok': True, 'action': 'replied_empty_text'}
 

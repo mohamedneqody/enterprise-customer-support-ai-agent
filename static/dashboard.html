@@ -111,8 +111,8 @@
 <div id="dashboard-app" style="display:none">
 <header>
   <div>
-    <h1>📊 لوحة تحكم الدعم الذكي</h1>
-    <small>متجر النور — Resolved / Escalated / Response Time / Satisfaction</small>
+    <h1>📊 لوحة تحكم المبيعات والدعم الذكي</h1>
+    <small>مطبعة الأصيل للطباعة والتغليف — Resolved / Escalated / Response Time / Satisfaction</small>
   </div>
   <a href="/" target="_blank" style="background:#10b981;color:#fff;text-decoration:none;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:700;display:inline-flex;align-items:center;gap:6px;box-shadow:0 2px 8px rgba(16,185,129,0.35);cursor:pointer;font-family:inherit;">💬 فتح الشات بوت</a>
   <button onclick="document.getElementById('upload-section').scrollIntoView({behavior:'smooth'})" style="background:#8b5cf6;color:#fff;border:none;padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">📁 رفع ملفات التدريب</button>
@@ -239,6 +239,24 @@
   </div>
 
 </div>
+</div>
+
+<div id="reply-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.7);z-index:999;align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:16px;width:90%;max-width:500px;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.3);">
+    <h3 style="margin-bottom:12px;font-size:18px;">💬 الرد على تذكرة #<span id="reply-tid"></span></h3>
+    
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#334155;">
+      <div id="reply-copilot-summary" style="display:none;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed #cbd5e1;"></div>
+      <button id="btn-copilot" style="background:#8b5cf6;color:#fff;border:none;padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;width:100%;font-family:inherit;">✨ اطلب مساعدة الذكاء الاصطناعي (Copilot)</button>
+    </div>
+
+    <textarea id="reply-text" rows="5" placeholder="اكتب رد الموظف هنا..." style="width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font-family:inherit;font-size:14px;resize:vertical;margin-bottom:16px;"></textarea>
+    
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button onclick="document.getElementById('reply-modal').style.display='none'" style="background:#e2e8f0;color:#475569;border:none;padding:9px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">إلغاء</button>
+      <button id="btn-send-reply" style="background:#4f46e5;color:#fff;border:none;padding:9px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">إرسال الرد للعميل</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -655,6 +673,18 @@ document.getElementById('btn-send-reply').addEventListener('click', function() {
   });
 });
 
+(function() {
+  var sp = new URLSearchParams(window.location.search);
+  var tk = sp.get('token');
+  if (tk) { localStorage.setItem('admin_token', tk); }
+  var sc = sp.get('scroll');
+  if (sc) {
+    setTimeout(function() {
+      var el = document.getElementById(sc);
+      if (el) el.scrollIntoView({behavior: 'instant', block: 'start'});
+    }, 900);
+  }
+})();
 if (getToken()) {
   load();
 } else {
@@ -664,24 +694,6 @@ setInterval(function () {
   if (getToken()) load();
 }, 5000);
 </script>
-
-<div id="reply-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.7);z-index:999;align-items:center;justify-content:center;">
-  <div style="background:#fff;border-radius:16px;width:90%;max-width:500px;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.3);">
-    <h3 style="margin-bottom:12px;font-size:18px;">💬 الرد على تذكرة #<span id="reply-tid"></span></h3>
-    
-    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#334155;">
-      <div id="reply-copilot-summary" style="display:none;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed #cbd5e1;"></div>
-      <button id="btn-copilot" style="background:#8b5cf6;color:#fff;border:none;padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;width:100%;font-family:inherit;">✨ اطلب مساعدة الذكاء الاصطناعي (Copilot)</button>
-    </div>
-
-    <textarea id="reply-text" rows="5" placeholder="اكتب رد الموظف هنا..." style="width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font-family:inherit;font-size:14px;resize:vertical;margin-bottom:16px;"></textarea>
-    
-    <div style="display:flex;gap:10px;justify-content:flex-end;">
-      <button onclick="document.getElementById('reply-modal').style.display='none'" style="background:#e2e8f0;color:#475569;border:none;padding:9px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">إلغاء</button>
-      <button id="btn-send-reply" style="background:#4f46e5;color:#fff;border:none;padding:9px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">إرسال الرد للعميل</button>
-    </div>
-  </div>
-</div>
 
 </body>
 </html>

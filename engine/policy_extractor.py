@@ -93,7 +93,10 @@ def extract_policies_from_kb_dir(kb_dir):
                     content = f.read()
                 file_p = extract_policies_from_text(content, source=fname)
                 for k in combined:
-                    combined[k].extend(file_p[k])
+                    for entry in file_p[k]:
+                        # إزالة التكرار: العنوان والجسم غالباً يحملان نفس السطر حرفياً
+                        if not any(existing.get('raw') == entry.get('raw') for existing in combined[k]):
+                            combined[k].append(entry)
             except Exception as e:
                 print(f"[PolicyExtractor Error in {fname}]: {e}")
                 

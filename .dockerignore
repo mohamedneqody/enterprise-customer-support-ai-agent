@@ -1,0 +1,10 @@
+models/
+archive/
+data/
+backups/
+sales_kit/
+A صور/
+__pycache__/
+*.pyc
+*.zip
+test_bank_v2/

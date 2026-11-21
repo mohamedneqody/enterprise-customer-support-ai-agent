@@ -100,7 +100,9 @@ def _scalar(v):
 
 
 def json_to_sections(data):
-    """أفضل شكل: قائمة {question, answer} — لكن أي JSON منظمتتعمل منه أقسام."""
+    """أفضل شكل: قائمة {question, answer} — لكن أي JSON منظمتتعمل منه أقسام.
+    القوائم المتداخلة داخل dict (مثل "faq": [{question,answer},...]) تُمشي
+    عليها كعناصر مستقلة — القديم كان يَسقطها صامتاً (bug سقط به محتوى FAQ كامل)."""
     sections = []
 
     def walk(node):
@@ -120,8 +122,13 @@ def json_to_sections(data):
                         if _scalar(v2):
                             lines.append(u'%s — %s: %s' % (k, k2, _scalar(v2)))
                 elif isinstance(v, list):
+                    # عناصر قائمة هيكلية (dict أو نصوص طويلة) = أقسام مستقلة، لا سطر واحد
                     for x in v:
-                        if _scalar(x):
+                        if isinstance(x, dict):
+                            walk(x)
+                        elif _scalar(x) and len(_scalar(x)) > 40:
+                            sections.append({'heading': _scalar(x)[:60], 'text': _scalar(x)})
+                        elif _scalar(x):
                             lines.append(u'%s: %s' % (k, _scalar(x)))
                 elif _scalar(v) and _scalar(v) != heading:
                     k_clean = str(k).lower().strip()
@@ -132,8 +139,10 @@ def json_to_sections(data):
             text = u'\n'.join(lines)
             if not text:
                 text = heading or u'قسم'
-            sections.append({'heading': heading or (lines[0][:60] if lines else u'قسم'),
-                             'text': text})
+            # تخطي الأقسام الفارغة الدلالياً (لا سؤالاً ولا إجابة)
+            if text.strip() not in ('قسم', 'section', '') or heading:
+                sections.append({'heading': heading or (lines[0][:60] if lines else u'قسم'),
+                                 'text': text})
         else:
             s = _scalar(node)
             if s:
@@ -211,8 +220,82 @@ def xlsx_rows(path):
     return all_rows
 
 
+# تسميات عربية عامة لحقول الجداول الشائعة (تُستخدم لبناء جملة طبيعية لكل صف —
+# تعمل مع أي دومين: خدمات، فروع، سياسات، فنادق، مكاتب قانون...)
+_FIELD_LABELS_AR = {
+    'service_name': 'الخدمة', 'name': 'الاسم', 'title': 'الاسم', 'product': 'المنتج',
+    'item': 'الصنف', 'plan': 'الخطة', 'branch_name': 'الفرع', 'city': 'المدينة',
+    'area': 'المنطقة/العنوان', 'address': 'العنوان', 'working_hours': 'مواعيد العمل',
+    'phone': 'التليفون', 'unit': 'وحدة التسعير', 'price': 'السعر', 'price_egp': 'السعر',
+    'cost': 'التكلفة', 'monthly_price': 'السعر الشهري', 'rate': 'السعر',
+    'production_days': 'مدة التنفيذ', 'delivery_days': 'مدة التسليم', 'duration': 'المدة',
+    'duration_minutes': 'المدة بالدقائق', 'days': 'الأيام', 'nights': 'الليالي',
+    'warranty_months': 'الضمان', 'min_qty': 'أقل كمية', 'max_area_sqm': 'أقصى مساحة',
+    'setup_fee_egp': 'رسوم الإعداد', 'rush_fee_pct': 'رسوم الاستعجال',
+    'seasonal_offer_discount_pct': 'خصم العرض الموسمي', 'discount_pct': 'نسبة الخصم',
+    'category': 'التصنيف', 'currency': 'العملة', 'services_available': 'الخدمات المتاحة',
+    'services_unavailable': 'الخدمات غير المتاحة', 'unavailable_reason': 'سبب عدم التوفر',
+    'conditions': 'الشروط', 'exclusion': 'مستثنى', 'excluded': 'مستثنى',
+    'special_terms': 'شروط خاصة', 'coverage': 'التغطية', 'notes': 'ملاحظات',
+    'answer': 'الإجابة', 'question': 'السؤال', 'description': 'الوصف',
+    # حقول عربية أصلية (CSV عربي بالكامل)
+    'اسم_الخدمة': 'الخدمة', 'اسم_الفرع': 'الفرع', 'اسم': 'الاسم',
+    'السعر_جنيه': 'السعر', 'المدة': 'المدة', 'نسبة_الخصم_%': 'نسبة الخصم',
+    'رسوم_إضافية_جنيه': 'رسوم إضافية', 'ملاحظات': 'ملاحظات',
+    'المدينة': 'المدينة', 'ساعات_العمل': 'ساعات العمل', 'ملاحظة_سلبية': 'ملاحظة سلبية',
+}
+
+
+def _ar_label(field):
+    """تسمية عربية لحقل أو الحقل نفسه — مع مطابقة دلالية عامة."""
+    f = str(field).strip()
+    fl = f.lower()
+    if f in _FIELD_LABELS_AR:
+        return _FIELD_LABELS_AR[f]
+    if fl in _FIELD_LABELS_AR:
+        return _FIELD_LABELS_AR[fl]
+    # مطابقة دلالية: أي حقل يحوي كلمة دالة يأخذ تسميتها العامة
+    for key, label in (('سعر', 'السعر'), ('خصم', 'الخصم'), ('رسوم', 'الرسوم الإضافية'),
+                       ('مدة', 'المدة'), ('ملاحظ', 'ملاحظات'), ('عملة', 'العملة'),
+                       ('مدينة', 'المدينة'), ('ساعات', 'ساعات العمل'), ('ضمان', 'الضمان')):
+        if key in f:
+            return label
+    for k, v in _FIELD_LABELS_AR.items():
+        if fl.endswith(k) or k in fl:
+            return v
+    return f
+
+
+def _row_sentence(header, cells):
+    """جملة طبيعية واحدة من صف جدول: "جلسة تصوير عائلية: السعر 900، المدة ساعة..."
+    حتى يفهم النموذج والاسترجاع أي رقم يعني ماذا (بدل قيم مفصولة بفواصل).
+    الاسم يُكشف دلالياً من اسم الحقل (اسم_الخدمة/اسم_الفرع/name/branch_name...)."""
+    pairs = [(h, c) for h, c in zip(header, cells) if c and h]
+    if not pairs:
+        return ''
+
+    def is_name_field(h):
+        hl = str(h).lower().strip()
+        return (hl in ('service_name', 'name', 'title', 'product', 'item', 'branch_name')
+                or 'اسم' in hl or hl.endswith('name'))
+
+    lead = ''
+    rest = []
+    for h, c in pairs:
+        if is_name_field(h) and not lead:
+            lead = c
+            continue
+        rest.append('%s %s' % (_ar_label(h), c))
+    if not lead and rest:
+        lead = ''
+    sentence = u'%s: %s.' % (lead, '، '.join(rest)) if rest else u'%s.' % lead
+    return re.sub(r'\s+', ' ', sentence).strip()
+
+
 def table_to_sections(rows):
-    """عمودين: الأول سؤال والتاني إجابة. أكتر من كده: أول عمود عنوان والباقي صفات."""
+    """عمودين: الأول سؤال والتاني إجابة. أكتر من كده: أول عمود عنوان والباقي صفات.
+    كل صف يُخرَج بجملة طبيعية بأسماء الحقول + السطور الخام key:value (للدقة)،
+    والعنوان = اسم العنصر + المعرّف (وليس المعرّف وحده P01)."""
     if not rows:
         return []
     width = max(max(r) for r in rows) + 1
@@ -235,28 +318,38 @@ def table_to_sections(rows):
             text = cells[1] if cells[1] else cells[0]
             sections.append({'heading': heading[:120], 'text': text})
         else:
-            # البحث الذكي عن عمود الاسم أو الوصف لدمجه في العنوان الرئيسي
-            name_val = ''
-            for h, c in zip(header, cells):
-                if h.lower() in ('name', 'title', 'item', 'service', 'plan', 'product', 'اسم', 'الاسم', 'خدمة', 'الخدمة', 'باقة', 'الباقة', 'منتج', 'المنتج') and c:
-                    name_val = c
-                    break
-            
+            # عمود الاسم: مطابقة تامة/جزئية لاتيني وعربي (اسم_الخدمة/اسم_الفرع/الاسم...)
+            name_idx = -1
+            id_idx = -1
+            for i, h in enumerate(header):
+                hl = h.lower().strip()
+                is_name = (hl in ('name', 'service_name', 'product', 'item', 'title', 'branch_name')
+                           or 'اسم' in h or hl.endswith('name'))
+                is_id = hl in ('id', 'code', 'sku', 'service_id', 'branch_id', 'item_id',
+                               'product_id', 'كود', 'رقم')
+                if name_idx < 0 and is_name:
+                    name_idx = i
+                if id_idx < 0 and is_id:
+                    id_idx = i
+            name_val = cells[name_idx] if name_idx >= 0 else ''
+            id_val = cells[id_idx] if id_idx >= 0 else ''
             first_val = cells[0] or nonempty[0]
-            if name_val and first_val and name_val != first_val:
-                heading = f'{name_val} ({first_val})'[:120]
-            else:
-                heading = (name_val or first_val)[:120]
+            if not name_val:
+                name_val = first_val
+            heading = f'{name_val} ({id_val})' if (id_val and id_val != name_val) else name_val[:120]
 
+            # جملة طبيعية بأسماء الحقول (مطالبة الإثراء) + السطور الخام تحت الجملة
+            sentence = _row_sentence(header, cells)
             lines = []
-            for h, c in zip(header[1:], cells[1:]):
-                if c:
-                    if h == 'warranty_months':
+            for h, c in zip(header, cells):
+                if c and h:
+                    if h.lower() == 'warranty_months':
                         lines.append(u'%s: %s (شهور)' % (h, c))
                     else:
-                        lines.append(u'%s: %s' % (h or u'قيمة', c))
-            text = u'\n'.join(lines) or heading
-            sections.append({'heading': heading, 'text': text})
+                        lines.append(u'%s: %s' % (h, c))
+            raw = u'\n'.join(lines) or heading
+            text = (sentence + u'\n' + raw) if sentence else raw
+            sections.append({'heading': heading[:120], 'text': text})
     if not sections:
         joined = u'\n'.join(c for row in grid for c in row if c.strip())
         sections = [{'heading': u'بيانات مستوردة', 'text': joined or u'فارغ'}]
@@ -364,8 +457,14 @@ def extract_pdf_text(path):
 
 
 def paragraphs_to_sections(text, min_len=40):
-    """تجميع سطور الـ PDF في فقرات، وكل فقرة تبقى قسم (العنوان أول جملة)."""
+    """تجميع سطور الـ PDF/TXT في فقرات منطقية:
+    - الأسطر الفاصلة (====== أو ———) تُتجاهل كزينة ولا تدخل في العناوين.
+    - الفقرة تنتهي بعلامة نهاية أو سطر فاصل؛ الشرائط القصيرة (شروط العرض
+      المبتورة) تُدمج في الفقرة السابقة حتى يبقى كل عرض/كيان chunk واحد
+      مكتمل (شرطه + استثناؤه + شروطه الخاصة)."""
     lines = [l.strip() for l in text.splitlines()]
+    # تجاهل أسطر الزينة الفاصلة بالكامل
+    lines = [l for l in lines if not re.fullmatch(r'[=\-—_·•]{4,}', l)]
     paras, cur = [], []
     for l in lines:
         if not l:
@@ -381,15 +480,37 @@ def paragraphs_to_sections(text, min_len=40):
         paras.append(' '.join(cur))
 
     def heading_of(p):
-        h = p[:70]
-        if len(p) > 70:
+        p_clean = re.sub(r'^[\s=\-—]+|[\s=\-—]+$', '', p)
+        h = p_clean[:70]
+        if len(p_clean) > 70:
             cut = h.rfind(' ')
             if cut > 30:
                 h = h[:cut]
-        return h.strip() + (u'…' if len(p) > 70 else '')
+        return h.strip() + (u'…' if len(p_clean) > 70 else '')
+
+    # دمج الشرائط القصيرة في الفقرة السابقة (عرض واحد = شرطه واستثناؤه معاً)
+    merged = []
+    NUMBERED_ENTITY = re.compile(r'^(?:عرض|قسم|بند|فصل|article|section|offer|item)\s*[\d一二三]+\s*[:：]', re.I)
+    last_entity = -1  # فهرس آخر كتلة كيان مرقّم مفتوحة
+    for p in paras:
+        p_clean = re.sub(r'^[\s=\-—]+|[\s=\-—]+$', '', p).strip()
+        if not p_clean:
+            continue
+        # فقرة "عرض N: ..." تفتح كتلة كيان مرقّم جديدة دائماً
+        if NUMBERED_ENTITY.match(p_clean):
+            merged.append(p_clean)
+            last_entity = len(merged) - 1
+            continue
+        # كل ما يلي كياناً مرقّماً وحتى الكيان التالي يخصه (بنوده وشروطه
+        # واستثناؤه وعربونه) — يُلحق بكتلته مهما كانت أرقامه (عيب 6:
+        # بند «العربون غير قابل للاسترداد» كان يسقط لوحده كchunk يتيم)
+        if merged and last_entity >= 0 and len(p_clean) < 300:
+            merged[last_entity] = merged[last_entity].rstrip('.') + '. ' + p_clean
+            continue
+        merged.append(p_clean)
 
     sections, buf = [], u''
-    for p in paras:
+    for p in merged:
         buf = (buf + u' ' + p).strip()
         if len(buf) >= min_len:
             sections.append({'heading': heading_of(buf), 'text': buf})

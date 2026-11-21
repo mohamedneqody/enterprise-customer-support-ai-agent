@@ -70,12 +70,18 @@ def rerank_matches(query, matches, top_k=4):
         doc_embs = model.encode(texts, convert_to_tensor=True)
         sims = util.cos_sim(q_emb, doc_embs)[0].tolist()
 
+        # معايرة الدرجة المعجمية لتكون في النطاق [0, 1] قبل دمجها مع تشابه BERT
+        max_orig = max(float(s) for _, s in matches) if matches else 1.0
+        if max_orig <= 0:
+            max_orig = 1.0
+
         scored_matches = []
         for i, (chunk, orig_score) in enumerate(matches):
-            bert_score = float(sims[i])
-            # دمج النتيجة: 65% BERT دلالي عميق + 35% TF-IDF معجمي
-            combined_score = 0.65 * bert_score + 0.35 * float(orig_score)
-            scored_matches.append((chunk, combined_score))
+            bert_score = max(0.0, float(sims[i]))  # حصر التشابه الدلالي في المجال الموجب [0, 1]
+            norm_orig = min(1.0, max(0.0, float(orig_score) / max_orig))
+            # دمج النتيجة المتوازنة رياضياً: 65% BERT دلالي عميق + 35% TF-IDF معجمي معايَر
+            combined_score = 0.65 * bert_score + 0.35 * norm_orig
+            scored_matches.append((chunk, round(combined_score, 4)))
 
         scored_matches.sort(key=lambda x: x[1], reverse=True)
         return scored_matches[:top_k]

@@ -3,6 +3,7 @@
 engine/session.py — إدارة ذاكرة الجلسات الذكية (Stateful Session Memory & Slot Tracking).
 يحفظ آخر 4 تبادلات (سؤال + إجابة) + الحالة الحوارية (Active State & Entities) لكل session_id.
 """
+import os
 import re
 import threading
 import time
@@ -11,28 +12,37 @@ from collections import OrderedDict
 _LOCK = threading.Lock()
 _MAX_SESSIONS = 1000
 _MAX_HISTORY_PER_SESSION = 4
-_SESSIONS = OrderedDict()  # session_id -> {'last_active': float, 'history': [...], 'state': {...}}
+_SESSIONS = OrderedDict()  # "tenant:session_id" -> {'last_active': float, 'history': [...], 'state': {...}}
 
 
-def get_history(session_id):
-    """إرجاع قائمة بآخر التبادلات للـ session_id المعطى."""
+def _make_key(session_id, tenant_id=None):
+    if not session_id:
+        return ""
+    tenant = tenant_id or os.environ.get('TENANT_ID', 'default').strip() or 'default'
+    return f"{tenant}:{session_id}"
+
+
+def get_history(session_id, tenant_id=None):
+    """إرجاع قائمة بآخر التبادلات للـ session_id المعطى مع عزل المستأجر."""
     if not session_id:
         return []
+    key = _make_key(session_id, tenant_id)
     with _LOCK:
-        sess = _SESSIONS.get(session_id)
+        sess = _SESSIONS.get(key)
         if sess:
             sess['last_active'] = time.time()
-            _SESSIONS.move_to_end(session_id)
+            _SESSIONS.move_to_end(key)
             return list(sess.get('history', []))
         return []
 
 
-def get_session_state(session_id):
-    """إرجاع الكيانات والحالة النشطة للجلسة الحالية."""
+def get_session_state(session_id, tenant_id=None):
+    """إرجاع الكيانات والحالة النشطة للجلسة الحالية مع عزل المستأجر."""
     if not session_id:
         return {}
+    key = _make_key(session_id, tenant_id)
     with _LOCK:
-        sess = _SESSIONS.get(session_id)
+        sess = _SESSIONS.get(key)
         if sess:
             return dict(sess.get('state', {}))
         return {}
@@ -41,11 +51,12 @@ def get_session_state(session_id):
 def _extract_entities_from_text(text):
     """استخراج الكيانات المفتاحية (فروع، سيارات، منتجات، أسماء) من النص للربط التتابعي."""
     entities = []
-    # التقاط أسماء الفروع أو الأماكن
-    branch_matches = re.findall(r'(?:فرع|في|بـ|ب)\s+([ا-ي\s]{3,25})(?:$|[,\.\n\?؟])', text)
+    # التقاط أسماء الفروع الصريحة فقط
+    branch_matches = re.findall(r'فرع\s+([\u0621-\u064A\s]{3,20})(?:$|[,\.\n\?؟])', text)
+    _EXCLUDE_BRANCHES = {'الفرع', 'المركز', 'المتجر', 'الموقع', 'الشركة', 'خدمة', 'الدعم', 'أقرب وقت', 'وقت ممكن', 'نفس اليوم'}
     for b in branch_matches:
         clean_b = b.strip()
-        if len(clean_b.split()) <= 3 and clean_b not in ['الفرع', 'المركز', 'المتجر', 'الموقع', 'الشركة']:
+        if len(clean_b.split()) <= 2 and clean_b not in _EXCLUDE_BRANCHES and not any(x in clean_b for x in _EXCLUDE_BRANCHES):
             entities.append(clean_b)
     
     # التقاط أسماء المنتجات أو السيارات أو الموديلات
@@ -58,18 +69,19 @@ def _extract_entities_from_text(text):
     return entities
 
 
-def add_exchange(session_id, query, answer, matches=None):
-    """إضافة تبادل وتحديث الحالة السياقية للجلسة (State Tracking)."""
+def add_exchange(session_id, query, answer, matches=None, tenant_id=None):
+    """إضافة تبادل وتحديث الحالة السياقية للجلسة (State Tracking) مع عزل المستأجر."""
     if not session_id or not query or not answer:
         return
+    key = _make_key(session_id, tenant_id)
     with _LOCK:
-        if session_id in _SESSIONS:
-            sess = _SESSIONS[session_id]
+        if key in _SESSIONS:
+            sess = _SESSIONS[key]
             sess['last_active'] = time.time()
             sess['history'].append({'query': query, 'answer': answer})
             if len(sess['history']) > _MAX_HISTORY_PER_SESSION:
                 sess['history'] = sess['history'][-_MAX_HISTORY_PER_SESSION:]
-            _SESSIONS.move_to_end(session_id)
+            _SESSIONS.move_to_end(key)
         else:
             if len(_SESSIONS) >= _MAX_SESSIONS:
                 _SESSIONS.popitem(last=False)
@@ -78,7 +90,7 @@ def add_exchange(session_id, query, answer, matches=None):
                 'history': [{'query': query, 'answer': answer}],
                 'state': {}
             }
-            _SESSIONS[session_id] = sess
+            _SESSIONS[key] = sess
 
         # تحديث الحالة والكيانات النشطة
         state = sess.setdefault('state', {})
@@ -114,13 +126,15 @@ def enrich_followup_query(session_id, current_query):
         return current_query
     
     with _LOCK:
-        sess = _SESSIONS.get(session_id)
+        # الجلسات مخزنة بمفتاح مُقيّد بالمستأجر (tenant:session_id) — نفس مفتاح add_exchange
+        sess = _SESSIONS.get(_make_key(session_id))
         if not sess:
             return current_query
-        
-        # 2-minute time limit check
+
+        # 2-minute time limit check — انتهت المهلة: جلسة جديدة تماماً (حالة + تاريخ)
         if time.time() - sess.get('last_active', 0) > 120:
             sess['state'].clear()
+            sess['history'] = []
             return current_query
             
         state = dict(sess.get('state', {}))
@@ -128,16 +142,27 @@ def enrich_followup_query(session_id, current_query):
 
     q_clean = current_query.strip()
     words = q_clean.split()
-    clean_words = set(w.lstrip('و').lstrip('ف') for w in words)
+    # إزالة علامات الترقيم من الكلمات قبل المطابقة ("والتاني؟" تكشف الضمير أيضاً)
+    clean_words = set()
+    for w in words:
+        w = re.sub(r'[^\w\u0621-\u064a]', '', w)
+        w = w.lstrip('و').lstrip('ف')
+        if w:
+            clean_words.add(w)
     
     # 1. حل الضمائر الصريحة للأطراف (التاني / الأول / الثاني)
     comp_pair = state.get('comparison_pair') or []
     last_ents = state.get('last_entities') or []
     last_heads = state.get('last_headings') or []
     
-    # فحص الإشارة للطرف الثاني
+    # فحص الإشارة للطرف الثاني — مع تمييز "التاني" الزمنية:
+    # "ألغيت تاني يوم" (يتبعها وحدة زمنية) ليست إشارة لطرف مقارنة
     second_cues = {'التاني', 'الثاني', 'التانية', 'الثانية', 'تانى', 'تاني'}
-    if any(w in second_cues for w in clean_words):
+    temporal_after = re.search(
+        r'(?:التاني|الثاني|التانية|الثانية|تانى|تاني)\s*'
+        r'(?:يوم|يومين|أيام|ايام|ساعة|ساعات|ساعه|أسبوع|اسبوع|شهر|شهور)',
+        _norm_q := re.sub(r'\s+', ' ', q_clean))
+    if any(w in second_cues for w in clean_words) and not temporal_after:
         target = None
         if len(comp_pair) >= 2:
             target = comp_pair[1]
@@ -164,14 +189,25 @@ def enrich_followup_query(session_id, current_query):
             rewritten = re.sub(r'(?:\b|[وف])(?:الاول|الأول|الاولى|الأولى|اول|أول)\b', target, q_clean)
             return rewritten
 
-    # 2. مؤشرات الإشارة العامة
+    # 2. مؤشرات الإشارة العامة (مع استثناء الإشارات الزمنية والظرفية مثل: الشهر ده، الأسبوع ده، السنة دي)
+    non_temporal_text = re.sub(r'\b(?:الشهر|الاسبوع|الأسبوع|السنة|السنه|اليوم|الوقت|المرة|المره)\s+(?:ده|دي)\b', ' ', q_clean)
+    words_for_cues = non_temporal_text.split()
+    clean_cue_words = set()
+    for w in words_for_cues:
+        w = re.sub(r'[^\w\u0621-\u064a]', '', w)
+        w = w.lstrip('و').lstrip('ف')
+        if w:
+            clean_cue_words.add(w)
+
     referential_prefixes = ['طيب و', 'طب و', 'طيب هو', 'طب هو', 'طيب هي', 'طب هي', 'طب ده', 'طيب ده', 'وهل ', 'طب ', 'طيب ']
     starts_with_prefix = any(q_clean.startswith(p) for p in referential_prefixes)
     
     referential_cues = {'ده', 'دي', 'هو', 'هي', 'دول', 'برضو', 'كمان', 'سعره', 'سعرها', 'مواعيدهم', 'بيشتغلوا', 'مكانهم', 'وبعدين', 'التاني', 'الثاني', 'التانية', 'الثانية', 'تاني', 'الاول', 'الأول'}
-    has_cue = any(w in referential_cues for w in clean_words)
+    has_cue = any(w in referential_cues for w in clean_cue_words)
     
-    is_followup = (len(words) <= 5 and (has_cue or (starts_with_prefix and len(words) <= 4))) or (len(words) <= 7 and has_cue and starts_with_prefix)
+    # إذا كان السؤال يحدد كياناً صريحاً بنفسه (مثل: باقة العروسة، فرع المعادي)، فهو سؤال متكامل
+    has_explicit_subject = bool(re.search(r'^(?:باقة|خدمة|تأمين|اشتراك|كورس|سيارة|فرع|منتج|برنامج|عرض)\s+[\u0621-\u064A]', q_clean))
+    is_followup = not has_explicit_subject and ((len(words) <= 5 and (has_cue or (starts_with_prefix and len(words) <= 4))) or (len(words) <= 7 and has_cue and starts_with_prefix))
     
     if is_followup:
         last_query = history[-1]['query'] if history else ''

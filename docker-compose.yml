@@ -1,0 +1,20 @@
+# نظام الدعم الذكي — تشغيل إنتاجي بحاوية واحدة
+# الاستخدام:  docker compose up -d
+# البيانات تُحفظ دائماً على الجهاز المضيف في مجلد ./data (لا تضيع مع الحاوية)
+services:
+  support-agent:
+    build: .
+    container_name: support-agent
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./data:/app/data                       # معرفة + تذاكر + سجلات (دائمة)
+      - ./models/bert_minilm:/app/models/bert_minilm:ro   # موديل الـ Reranker المحلي
+      - ./backups:/app/backups                 # النسخ الاحتياطية
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"    # للوصول لـ Ollama على الجهاز المضيف
+    restart: unless-stopped

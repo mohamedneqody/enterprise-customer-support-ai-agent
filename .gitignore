@@ -21,4 +21,6 @@ __pycache__/
 # Archives & Temporary files
 *.zip
 *.log
+*.db
+audit_log.jsonl
 data/temp_uploads/

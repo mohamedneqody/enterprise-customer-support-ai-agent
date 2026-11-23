@@ -17,9 +17,8 @@ import json
 import os
 import re
 import threading
-import urllib.request
 
-from engine import audit, store
+from engine import audit, providers, store
 
 _ENABLED = os.environ.get('ENABLE_JUDGE', 'true').lower() in ('true', '1', 'yes')
 _TIMEOUT = float(os.environ.get('JUDGE_TIMEOUT', '60'))
@@ -59,22 +58,21 @@ def parse_verdict(text):
     return {'supported': supported, 'problems': [str(p)[:200] for p in problems]}
 
 
-def _call_ollama(prompt):
-    host = os.environ.get('OLLAMA_HOST', 'http://localhost:11434').rstrip('/')
-    model = os.environ.get('OLLAMA_MODEL', 'qwen2.5:3b')
-    payload = {
-        'model': model,
-        'prompt': prompt,
-        'stream': False,
-        'format': 'json',
-        'keep_alive': -1,
-        'options': {'temperature': 0.0, 'num_predict': 220},
-    }
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(host + '/api/generate', data=data,
-                                 headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        return json.loads(resp.read().decode('utf-8')).get('response', '')
+def _call_judge_llm(prompt):
+    """استدعاء نموذج المُحكّم عبر طبقة providers (يدعم JUDGE_PROVIDER وJUDGE_MODEL مستقلين)."""
+    j_prov = os.environ.get('JUDGE_PROVIDER', '').strip() or None
+    j_model = os.environ.get('JUDGE_MODEL', '').strip() or None
+    res = providers.complete(
+        prompt,
+        tier='pro' if (j_prov in ('gemini', 'openai') and not j_model) else 'fast',
+        provider=j_prov,
+        model_override=j_model,
+        temperature=0.0,
+        max_tokens=220,
+        json_mode=True,
+        timeout=_TIMEOUT,
+    )
+    return res.get('text', '')
 
 
 def grade_now(query, answer, contexts):
@@ -85,7 +83,7 @@ def grade_now(query, answer, contexts):
     prompt = '%s\n\nمقاطع المعرفة المرجعية:\n%s\n\nسؤال العميل: %s\nالإجابة المُقيَّمة: %s\nJSON:' % (
         _PROMPT, ctx, query[:300], answer[:800])
     try:
-        raw = _call_ollama(prompt)
+        raw = _call_judge_llm(prompt)
     except Exception as e:
         audit.log_event({'type': 'judge_error', 'error': str(e)[:200]})
         return None

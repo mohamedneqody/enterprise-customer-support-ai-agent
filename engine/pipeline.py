@@ -15,7 +15,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 
-from engine import actions, ai, audit, cust_memory, guardrails, llm, policy_extractor, premath, rag, reranker, rule_evaluator, sentiment, session, store
+from engine import actions, ai, audit, cust_memory, guardrails, llm, policy_extractor, premath, providers, rag, reranker, rule_evaluator, sentiment, session, store
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -112,6 +112,7 @@ def reload_index():
     _INDEX_BY_TENANT[tenant] = rag.KnowledgeIndex(kb_dir).build()
     policy_extractor.get_tenant_policies(tenant, kb_dir, force_reload=True)
     clear_answer_cache()  # المعرفة تغيرت: كل الردود المخزنة قد تصبح قديمة
+    providers.invalidate_context_cache(tenant)  # إبطال Context Cache السحابي
     return _INDEX_BY_TENANT[tenant]
 
 
@@ -178,13 +179,22 @@ def extract_comparison_targets(query):
 
 
 # ---------------------------------------------------------------- كشف حقن التعليمات
-# ادعاء صلاحية أو أمر بتجاهل القواعد — يُرفض برسالة مميزة ولا يُصنف "خارج المعرفة"
+# ادعاء صلاحية أو أمر بتجاهل القواعد أو استخراج البرومبت (عربي + إنجليزي) — يُرفض برسالة مميزة
 _INJECTION_PATTERNS = [
+    # أنماط عربية (انتحال صلاحية / تجاهل قواعد / سرقة تعليمات النظام)
     r'بصفتك\s+(?:مدير|مسؤول|مالك|موظف|أدمن|ادمن|admin)',
     r'(?:وافق(?:\s*لي)?|وافقي|أكد لي|أكدلي)\s+(?:على\s+)?(?:خصم|تخفيض|إلغاء|استرداد)',
-    r'تجاهل\s+(?:التعليمات|القواعد|البرومبت|كل ما سبق)',
+    r'تجاهل\s+(?:كل\s+)?(?:التعليمات|القواعد|البرومبت|كل ما سبق|الاوامر)',
     r'أنت الآن\s+', r'انت الان\s+',
     r'من\s+(?:الأعلى|الإدارة|الإداره)\s+(?:أطلب|انا)',
+    r'(?:اعرض|اظهر|اطبع|قولي|هات)\s+(?:لي\s+)?(?:تعليمات النظام|البرومبت|التعليمات السريه|التعليمات السرية|system prompt)',
+    r'تجاوز\s+(?:القيود|القواعد|الحماية|النظام)',
+    # أنماط إنجليزية (Prompt Injection / System Prompt Extraction / Jailbreak)
+    r'ignore\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions|rules|prompts)',
+    r'disregard\s+(?:all\s+)?(?:previous|prior|system)\s+(?:instructions|rules)',
+    r'(?:reveal|show|print|dump|repeat)\s+(?:your\s+|the\s+)?(?:system\s+prompt|hidden\s+instructions|initial\s+instructions)',
+    r'(?:act\s+as|you\s+are\s+now|pretend\s+to\s+be)\s+(?:an?\s+)?(?:admin|administrator|developer|root|owner|dan|jailbreak)',
+    r'\b(?:jailbreak|developer\s+mode|override\s+rules|bypass\s+policy)\b',
 ]
 
 _INJECTION_REFUSAL = ('عذراً، لا أملك صلاحية الموافقة على خصومات أو استثناءات خارج العروض المنشورة '
@@ -193,9 +203,9 @@ _INJECTION_REFUSAL = ('عذراً، لا أملك صلاحية الموافقة 
 
 
 def _detect_injection(message):
-    """هل الرسالة تحاول انتحال صلاحية أو تجاوز القواعد؟"""
+    """هل الرسالة تحاول انتحال صلاحية أو تجاوز القواعد أو كشف تعليمات النظام؟"""
     n = rag.normalize(message)
-    return any(re.search(pat, n) for pat in _INJECTION_PATTERNS)
+    return any(re.search(pat, n, re.IGNORECASE) for pat in _INJECTION_PATTERNS)
 
 
 def _has_arabic_any(text, words):
@@ -212,10 +222,11 @@ def _is_refund_like(text):
 
 def _sanitize_entry(msg):
     """المحطة 1 — تنقية المدخل قبل أي طبقة: تعطيل رموز كسر صندوق البرومبت
-    ([ ] { } `) التي قد ينتحل بها المخترق شكل قوالب النظام أو المراجع،
+    ([ ] { } ` < >) التي قد ينتحل بها المخترق شكل قوالب النظام أو وسوم XML،
     مع الحفاظ على النص العربي والمعنى كما هو."""
     return (msg.replace('[', '(').replace(']', ')')
                .replace('{', '(').replace('}', ')')
+               .replace('<', '(').replace('>', ')')
                .replace('`', "'"))
 
 
@@ -713,6 +724,12 @@ def handle_message(message, session_id='', now=None, enable_llm=None):
             llm_ms = 0
         else:
             t_llm = time.perf_counter()
+            cache_ctx = None
+            if providers.get_provider() == 'gemini' and providers.is_context_cache_enabled():
+                cache_ctx = '\n\n'.join(
+                    f"## {c.get('heading', '')}\n{c.get('text', '')}"
+                    for c in index.chunks[:40]
+                )
             answer, model_used, audit_notes = llm.generate_answer(
                 search_query,
                 matches,
@@ -721,7 +738,10 @@ def handle_message(message, session_id='', now=None, enable_llm=None):
                 history=history,
                 is_medium_conf=(CONF_MIN_CUTOFF <= confidence < CONF_ESCALATE),
                 forced_answer=forced_answer,
-                cust_note=cust_note
+                cust_note=cust_note,
+                confidence=confidence,
+                tenant_id=get_tenant_id(),
+                cacheable_context=cache_ctx,
             )
             llm_ms = int((time.perf_counter() - t_llm) * 1000)
             if ckey and audit_notes == []:
@@ -802,7 +822,9 @@ def handle_message(message, session_id='', now=None, enable_llm=None):
             is_medium_conf=(CONF_MIN_CUTOFF <= confidence < CONF_ESCALATE),
             forced_answer=forced_answer,
             cust_note=cust_note,
-            retry_feedback=feedback
+            retry_feedback=feedback,
+            confidence=confidence,
+            tenant_id=get_tenant_id(),
         )
         llm_ms = llm_ms + int((time.perf_counter() - t_llm) * 1000)
         model_used = model_used + '_reflexion'
@@ -852,6 +874,11 @@ def handle_message(message, session_id='', now=None, enable_llm=None):
     ticket = store.create_ticket(ticket)
     audit.log_guardrail(ticket['id'], message, audit_notes)
     audit.log_ticket(ticket)
+    # المحطة الخامسة: استخراج استمارة JSON للإجراءات الحقيقية (حجز/طلب/شكوى/Lead) في خيط خلفي
+    try:
+        actions.process_async(ticket['id'], session_id, message, use_llm=use_llm)
+    except Exception:
+        pass
     # المحطة الثامنة: مُحكّم آلي في خيط خلفي للإجابات التوليدية المحلولة فقط
     # (المسارات الحتمية موثقة بالبناء، والمصعّدة راجعة لبشري أصلاً) —
     # الحكم غير المدعوم يُعلَّم على التذكرة ويُسجل في audit_log للمساءلة
@@ -915,6 +942,8 @@ def compute_stats():
         avg_rating = sum(t.get('rating', 0) for t in rated) / len(rated)
         satisfaction = round(100.0 * sum(1 for t in rated if t.get('rating', 0) >= 4) / len(rated))
 
+    judge_flagged_count = sum(1 for t in tickets if t.get('judge_flagged'))
+
     # آخر 12 تذكرة بصيغة حقول الداشبورد (message بدلاً من query)
     recent = []
     for t in list(reversed(tickets))[:12]:
@@ -927,6 +956,11 @@ def compute_stats():
             'response_ms': t.get('response_ms', 0),
             'rating': t.get('rating'),
             'human_reply': t.get('human_reply'),
+            'model_used': t.get('model_used'),
+            'judge_supported': t.get('judge_supported'),
+            'judge_flagged': bool(t.get('judge_flagged')),
+            'judge_problems': t.get('judge_problems', ''),
+            'action_payload': t.get('action_payload'),
         })
 
     # تجميع آخر 7 أيام لرسم الأعمدة
@@ -949,6 +983,7 @@ def compute_stats():
         'escalated': escalated,
         'priority': priority,
         'unresolved': total - resolved - escalated - priority,
+        'judge_flagged_count': judge_flagged_count,
         'avg_confidence': round(avg_conf, 2),
         'avg_response_ms': round(avg_resp),
         'resolution_rate': round(resolved / total * 100, 1) if total else 0.0,

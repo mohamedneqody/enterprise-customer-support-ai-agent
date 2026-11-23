@@ -233,11 +233,15 @@ def create_ticket(ticket):
             conn.commit()
         finally:
             conn.close()
-        # المحطة 2: تحديث ملف العميل بعد نجاح التأكيد (خارج المعاملة)
+        # المحطة 2: تحديث ملف العميل وحقائقه الدائمة بعد نجاح التأكيد (خارج المعاملة)
         try:
             from engine import cust_memory
-            cust_memory.remember(ticket.get('session_id'),
-                                 ticket.get('query'), ticket.get('answer'))
+            cust_memory.remember(
+                ticket.get('session_id'),
+                ticket.get('query'),
+                ticket.get('answer'),
+                enable_llm_extract=(ticket.get('mode') == 'llm'),
+            )
         except Exception:
             pass
         return ticket

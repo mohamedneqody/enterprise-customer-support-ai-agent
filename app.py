@@ -202,6 +202,33 @@ class Handler(BaseHTTPRequestHandler):
             try: self._json({"error": "server_error"}, 500)
             except: pass
 
+    def do_DELETE(self):
+        try:
+            self._do_DELETE_impl()
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+        except Exception as e:
+            print(f"[Error in DELETE {self.path}]: {e}", file=sys.stderr)
+            try: self._json({"error": "server_error"}, 500)
+            except: pass
+
+    def _do_DELETE_impl(self):
+        path = urlsplit(self.path).path
+        if path.startswith('/api/memory/'):
+            if not self._check_auth():
+                self._json({'error': 'unauthorized'}, 401)
+                return
+            from urllib.parse import unquote
+            from engine import cust_memory
+            customer_key = unquote(path[len('/api/memory/'):]).strip()
+            if not customer_key:
+                self._json({'error': 'customer_key_required'}, 400)
+                return
+            ok = cust_memory.purge(customer_key)
+            self._json({'ok': ok, 'purged': customer_key}, 200 if ok else 500)
+        else:
+            self._json({'error': 'not_found'}, 404)
+
     def _do_GET_impl(self):
         path = urlsplit(self.path).path
         qs = parse_qs(urlsplit(self.path).query)
@@ -227,14 +254,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'error': 'verification_failed_or_not_configured'}, 403)
         elif path == '/api/health':
             idx = pipeline.get_index()
+            from engine import providers
             self._json({
                 'ok': True,
                 'tenant': os.environ.get('TENANT_ID', 'default').strip() or 'default',
                 'kb_files': len(idx.sources()),
                 'kb_chunks': len(idx.chunks),
                 'llm_enabled': pipeline.ENABLE_LLM,
+                'llm_provider': providers.get_status(),
                 'reranker_enabled': __import__('engine.reranker', fromlist=['is_enabled']).is_enabled()
             })
+        elif path.startswith('/api/memory/'):
+            if not self._check_auth():
+                self._json({'error': 'unauthorized'}, 401)
+                return
+            from urllib.parse import unquote
+            from engine import cust_memory
+            customer_key = unquote(path[len('/api/memory/'):]).strip()
+            if not customer_key:
+                self._json({'error': 'customer_key_required'}, 400)
+                return
+            prof = cust_memory.get_profile(customer_key)
+            self._json({'ok': True, 'customer_key': customer_key, 'profile': prof}, 200)
         elif path == '/api/stats':
             if not self._check_auth():
                 self._json({'error': 'unauthorized'}, 401)
